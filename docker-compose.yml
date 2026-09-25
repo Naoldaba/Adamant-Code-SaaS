@@ -1,6 +1,8 @@
 services:
   db:
-    image: postgres:16
+    # pgvector/pgvector:pg16 is a drop-in replacement for postgres:16 that ships
+    # the `vector` extension used for RAG embedding similarity search.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -26,6 +28,9 @@ services:
       PASSWORD_SALT: dev_salt_change_me
       SESSION_SECRET: dev_session_secret_change_me
       CORS_ORIGIN: http://localhost:3000
+      # Embedding dimension for RAG chunk vectors. Must match the migration and
+      # the configured provider (1536 = OpenAI text-embedding-3-small / local).
+      EMBEDDING_DIM: "1536"
     ports:
       - "4000:4000"
     depends_on:
