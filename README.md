@@ -161,6 +161,43 @@ Query parameters for exports:
 
 Valid types: `docs`, `policies`, `api_reference`, `changelog`, `incidents`, `support`, `feature_flags`, `analytics_events`, `playbooks`
 
+### Knowledge Assistant Endpoints
+
+The Knowledge Assistant module (sidebar → **Knowledge Assistant**) has two tabs: a
+**Chatbot** (RAG, added in a later phase) and an admin-only **Knowledge Uploader**
+that ingests JSONL/NDJSON exports into a single shared/global knowledge base.
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/assistant/knowledge/ingest?filename=<name.jsonl>` | admin | Ingest an uploaded JSONL/NDJSON file (raw text body) |
+| POST | `/assistant/knowledge/ingest/from-module/:type` | admin | Ingest an existing module directly from the DB |
+| GET | `/assistant/knowledge/ingestions` | admin | Ingestion run history (counts + per-line errors) |
+| GET | `/assistant/knowledge/documents` | authenticated | Ingested knowledge base summary (counts + totals) |
+
+**Ingestion behavior**
+
+- **Format/size validation** — only `.jsonl`/`.ndjson` are accepted; empty files and
+  files larger than `KB_MAX_UPLOAD_MB` (default 5 MB) are rejected with a clear message.
+- **Safe parsing** — each line is parsed independently; malformed lines are skipped and
+  reported with their 1-based line number and error message (the rest still ingest).
+- **Source metadata preserved** — each ingested document retains its origin
+  (`module_type`, `source_id` = original `knowledge_items.id`, category, tags,
+  timestamps, filename) for traceability and future citations.
+- **Deduplication** — documents are keyed by `(source_type, source_id)`; re-ingesting the
+  same item **updates** it (or **skips** if unchanged) rather than creating duplicates.
+  The response reports `inserted` / `updated` / `skipped` / `failed` counts.
+- **Searchable only after success** — all document/chunk writes happen in one transaction,
+  so content becomes visible to retrieval only after the ingestion run succeeds; a failed
+  run rolls back and contributes nothing.
+
+The upload file is sent as the raw request body with `Content-Type: text/plain` (the
+filename travels as the `filename` query parameter), so no multipart dependency is required.
+
+**Embeddings / provider** — chunk embeddings are produced by a pluggable provider. Phase 2
+ships a deterministic, offline **local** provider (feature-hashed, L2-normalized vectors of
+`EMBEDDING_DIM` dimensions) so ingestion works with no API key. Embeddings are stored in a
+pgvector `vector(EMBEDDING_DIM)` column for later similarity search.
+
 ## Project Structure
 
 ```
@@ -203,6 +240,29 @@ Run API tests:
 cd apps/api
 npm test
 ```
+
+The default test run is hermetic (no database required) and covers JSONL parsing,
+upload validation, metadata flattening, chunking, deduplication decisions, and the
+local embedding provider.
+
+Additional HTTP-level integration tests (auth enforcement, full ingestion lifecycle,
+deduplication counts, searchable-after-success) run against a real pgvector Postgres
+when `DATABASE_URL_TEST` is set; otherwise they are skipped:
+
+```bash
+# start a throwaway pgvector database, then:
+DATABASE_URL_TEST=postgres://postgres:postgres@localhost:5432/ac_test npm --workspace @ac/api test
+```
+
+## Environment Variables
+
+See `env.example` for the full list. Knowledge Assistant additions:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EMBEDDING_DIM` | `1536` | Embedding vector dimension (must match the migration and provider) |
+| `KB_MAX_UPLOAD_MB` | `5` | Maximum Knowledge Uploader file size in MB |
+| `OPENAI_API_KEY` | _(unset)_ | Optional; reserved for the OpenAI provider (RAG phase) |
 
 ## License
 

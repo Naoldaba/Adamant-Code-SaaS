@@ -31,6 +31,8 @@ services:
       # Embedding dimension for RAG chunk vectors. Must match the migration and
       # the configured provider (1536 = OpenAI text-embedding-3-small / local).
       EMBEDDING_DIM: "1536"
+      # Max Knowledge Uploader file size in MB (oversized uploads are rejected).
+      KB_MAX_UPLOAD_MB: "5"
     ports:
       - "4000:4000"
     depends_on:
