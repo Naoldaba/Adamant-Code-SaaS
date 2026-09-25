@@ -199,9 +199,9 @@ filename travels as the `filename` query parameter), so no multipart dependency 
 **Embeddings / provider** — chunk embeddings are produced by a pluggable provider. A
 deterministic, offline **local** provider (feature-hashed, L2-normalized vectors of
 `EMBEDDING_DIM` dimensions) is used by default so ingestion and chat work with no API key.
-When `OPENAI_API_KEY` is set, an OpenAI-backed provider is used for both embeddings and
-generation instead. Embeddings are stored in a pgvector `vector(EMBEDDING_DIM)` column and
-searched by cosine similarity.
+When `OPENAI_API_KEY` or `GEMINI_API_KEY` is set, that hosted provider is used for both
+embeddings and generation instead (priority OpenAI → Gemini → local). Embeddings are stored
+in a pgvector `vector(EMBEDDING_DIM)` column and searched by cosine similarity.
 
 > **Note on the keyless default:** without an `OPENAI_API_KEY`, the local answer
 > provider is *extractive* — it returns the relevant retrieved chunks verbatim with
@@ -298,13 +298,21 @@ See `env.example` for the full list. Knowledge Assistant additions:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMBEDDING_DIM` | `1536` | Embedding vector dimension (must match the migration and provider) |
+| `EMBEDDING_DIM` | `768` | Embedding vector dimension (must match the migration column and provider; 768 = Gemini `text-embedding-004`, also valid for local/OpenAI) |
 | `KB_MAX_UPLOAD_MB` | `5` | Maximum Knowledge Uploader file size in MB |
 | `RAG_TOP_K` | `6` | Number of chunks retrieved per question before relevance filtering |
-| `RAG_MIN_SCORE` | `0.2` | Minimum cosine similarity for a chunk to be considered relevant |
+| `RAG_MIN_SCORE` | `0.1` | Minimum cosine similarity for a chunk to be considered relevant (tuned for the offline local provider, whose scores are low/compressed; raise it when using a real embedding provider) |
 | `OPENAI_API_KEY` | _(unset)_ | Optional; when set, OpenAI is used for embeddings + answer generation instead of the local provider |
 | `OPENAI_MODEL` | `gpt-4.1-mini` | Chat model used when `OPENAI_API_KEY` is set |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model used when `OPENAI_API_KEY` is set |
+| `GEMINI_API_KEY` | _(unset)_ | Optional (has a free tier); when set (and no `OPENAI_API_KEY`), Google Gemini is used for embeddings + answer generation |
+| `GEMINI_MODEL` | `gemini-flash-lite-latest` | Gemini chat model used when `GEMINI_API_KEY` is set (transient 503/429 are retried) |
+| `GEMINI_EMBEDDING_MODEL` | `gemini-embedding-001` | Gemini embedding model used when `GEMINI_API_KEY` is set (requested at 768-dim) |
+
+Provider priority is **OpenAI → Gemini → offline local**. Set exactly one key. Because
+stored chunk vectors and query vectors must come from the same model (and match
+`EMBEDDING_DIM`), switching providers or changing the dimension requires a fresh DB
+(`docker compose down -v`) and re-ingestion.
 
 ## License
 

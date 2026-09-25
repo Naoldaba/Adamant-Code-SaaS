@@ -18,8 +18,8 @@ export function ragTopK(): number {
  * grounding an answer in weak matches.
  */
 export function ragMinScore(): number {
-  const n = Number(process.env.RAG_MIN_SCORE ?? 0.2);
-  return Number.isFinite(n) ? n : 0.2;
+  const n = Number(process.env.RAG_MIN_SCORE ?? 0.1);
+  return Number.isFinite(n) ? n : 0.1;
 }
 
 export type RetrieveOptions = {

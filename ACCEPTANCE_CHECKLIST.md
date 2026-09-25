@@ -56,13 +56,14 @@ inspection alone. Evidence:
       conversation all **404**; the owner still saw it afterward.
 
 **Caveat (not a defect):** with the default **offline** local embedding provider
-(deterministic feature-hashing, used when `OPENAI_API_KEY` is unset), a question
-made only of real English words that are genuinely off-topic can still clear a low
-`RAG_MIN_SCORE` via hash-bucket collisions and retrieve loosely-related chunks. The
-default threshold is `RAG_MIN_SCORE=0.2` to sharpen this on the keyless default
-path; fully out-of-vocabulary queries correctly return insufficient. The threshold
-→ explicit-non-answer mechanism is correct and works as specified; a real embedding
-provider (set `OPENAI_API_KEY`) scores off-topic queries low semantically.
+(deterministic feature-hashing, used when `OPENAI_API_KEY` is unset), relevant and
+off-topic queries produce low, overlapping cosine scores (~0.10–0.19), so no single
+threshold cleanly separates them. `RAG_MIN_SCORE` defaults to `0.1`, which favors
+recall (relevant content is retrieved) at the cost of occasionally admitting a
+loosely-related chunk for an off-topic question. The threshold → explicit-non-answer
+mechanism is correct and works as specified; a real embedding provider (set
+`OPENAI_API_KEY`) produces well-separated scores, at which point a higher
+`RAG_MIN_SCORE` (e.g. 0.2+) sharpens the insufficient-knowledge behavior.
 
 **No in-scope code defects were found.** The one non-passing quality gate is lint
 (see the Quality section), which is a pre-existing scaffold/Next 16 tooling issue

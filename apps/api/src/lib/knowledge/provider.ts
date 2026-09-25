@@ -124,17 +124,79 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
 }
 
 /**
- * Select the embedding provider for this deployment. The OpenAI provider is used
- * when `OPENAI_API_KEY` is set; otherwise the deterministic offline local
- * provider keeps `docker compose up` and the test suite working without secrets.
+ * Google Gemini embedding provider, activated when `GEMINI_API_KEY` is set (and no
+ * `OPENAI_API_KEY`). Uses the Generative Language `batchEmbedContents` endpoint via
+ * the global `fetch` (no SDK dependency). `outputDimensionality` is pinned to
+ * `EMBEDDING_DIM` so the returned vectors match the `vector(EMBEDDING_DIM)` column
+ * regardless of the model's native dimension (`gemini-embedding-001` supports
+ * Matryoshka output dims; we request `EMBEDDING_DIM`, default 768).
+ */
+export class GeminiEmbeddingProvider implements EmbeddingProvider {
+  public readonly name = "gemini";
+  public readonly dimension: number;
+  private readonly apiKey: string;
+  private readonly model: string;
+
+  constructor(
+    apiKey: string,
+    dimension: number = embeddingDimension(),
+    model = process.env.GEMINI_EMBEDDING_MODEL ?? "gemini-embedding-001"
+  ) {
+    this.apiKey = apiKey;
+    this.dimension = dimension;
+    this.model = model.startsWith("models/") ? model : `models/${model}`;
+  }
+
+  async embed(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const body = {
+      requests: texts.map((t) => ({
+        model: this.model,
+        content: { parts: [{ text: t }] },
+        outputDimensionality: this.dimension
+      }))
+    };
+    let res: Response;
+    try {
+      res = await fetchWithRetry(
+        `https://generativelanguage.googleapis.com/v1beta/${this.model}:batchEmbedContents?key=${this.apiKey}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body)
+        }
+      );
+    } catch (e) {
+      throw new ProviderError("Embedding provider request failed", e);
+    }
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new ProviderError(`Embedding provider returned ${res.status}: ${detail.slice(0, 200)}`);
+    }
+    const json = (await res.json()) as { embeddings?: { values: number[] }[] };
+    if (!json.embeddings || json.embeddings.length !== texts.length) {
+      throw new ProviderError("Embedding provider returned an unexpected number of embeddings");
+    }
+    return json.embeddings.map((e) => e.values);
+  }
+}
+
+/**
+ * Select the embedding provider for this deployment. Priority: OpenAI (if
+ * `OPENAI_API_KEY`), then Gemini (if `GEMINI_API_KEY`), otherwise the deterministic
+ * offline local provider that keeps `docker compose up` and the test suite working
+ * without secrets.
  *
  * Retrieval and ingestion both call this function, so query embeddings are always
  * produced by the same provider that produced the stored chunk embeddings — a
- * hard requirement for the cosine similarities to be meaningful.
+ * hard requirement for the cosine similarities to be meaningful. Switching provider
+ * (or changing `EMBEDDING_DIM`) requires re-ingesting the knowledge base.
  */
 export function getEmbeddingProvider(): EmbeddingProvider {
-  const key = process.env.OPENAI_API_KEY?.trim();
-  if (key) return new OpenAIEmbeddingProvider(key);
+  const openai = process.env.OPENAI_API_KEY?.trim();
+  if (openai) return new OpenAIEmbeddingProvider(openai);
+  const gemini = process.env.GEMINI_API_KEY?.trim();
+  if (gemini) return new GeminiEmbeddingProvider(gemini);
   return new LocalEmbeddingProvider();
 }
 
@@ -154,6 +216,25 @@ export class ProviderError extends Error {
     this.name = "ProviderError";
     this.cause = cause;
   }
+}
+
+/**
+ * `fetch` with bounded retries for transient upstream conditions. Hosted model
+ * endpoints (notably Gemini's `-latest` aliases) intermittently return 503
+ * "high demand" / UNAVAILABLE and 429 rate-limit responses that succeed on a
+ * retry; anything else (including 4xx other than 429) returns immediately so real
+ * errors are not masked. A persistent failure is surfaced by the caller as a
+ * ProviderError, keeping the "provider failure ⇒ no partial answer stored" contract.
+ */
+async function fetchWithRetry(url: string, init: RequestInit, attempts = 3): Promise<Response> {
+  let last: Response | undefined;
+  for (let i = 0; i < attempts; i++) {
+    const res = await fetch(url, init);
+    if (res.status !== 503 && res.status !== 429) return res;
+    last = res;
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+  }
+  return last as Response;
 }
 
 export type GenerateAnswerInput = {
@@ -244,11 +325,72 @@ export class OpenAIChatProvider implements ChatProvider {
 }
 
 /**
- * Select the answer provider: OpenAI when a key is configured, otherwise the
- * deterministic local extractive provider.
+ * Google Gemini answer provider, activated when `GEMINI_API_KEY` is set (and no
+ * `OPENAI_API_KEY`). Reuses the shared grounded prompt: the system rules become
+ * Gemini's `systemInstruction`, and the numbered-context user turn plus prior
+ * history become `contents` (assistant turns map to Gemini's `model` role). Any
+ * transport or API failure is normalized to `ProviderError`.
+ */
+export class GeminiChatProvider implements ChatProvider {
+  public readonly name = "gemini";
+  private readonly apiKey: string;
+  private readonly model: string;
+
+  constructor(apiKey: string, model = process.env.GEMINI_MODEL ?? "gemini-flash-lite-latest") {
+    this.apiKey = apiKey;
+    this.model = model.startsWith("models/") ? model : `models/${model}`;
+  }
+
+  async generateAnswer(input: GenerateAnswerInput): Promise<{ text: string }> {
+    const messages = buildGroundedPrompt(input.question, input.contexts, input.history);
+    const system = messages.find((m) => m.role === "system")?.content;
+    const contents = messages
+      .filter((m) => m.role !== "system")
+      .map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }));
+
+    const body: Record<string, unknown> = { contents, generationConfig: { temperature: 0 } };
+    if (system) body.systemInstruction = { parts: [{ text: system }] };
+
+    let res: Response;
+    try {
+      res = await fetchWithRetry(
+        `https://generativelanguage.googleapis.com/v1beta/${this.model}:generateContent?key=${this.apiKey}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body)
+        }
+      );
+    } catch (e) {
+      throw new ProviderError("Answer provider request failed", e);
+    }
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new ProviderError(`Answer provider returned ${res.status}: ${detail.slice(0, 200)}`);
+    }
+    let json: { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+    try {
+      json = (await res.json()) as typeof json;
+    } catch (e) {
+      throw new ProviderError("Answer provider returned an unreadable response", e);
+    }
+    const text = json.candidates?.[0]?.content?.parts
+      ?.map((p) => p.text ?? "")
+      .join("")
+      .trim();
+    if (!text) throw new ProviderError("Answer provider returned an empty response");
+    return { text };
+  }
+}
+
+/**
+ * Select the answer provider. Priority: OpenAI (if `OPENAI_API_KEY`), then Gemini
+ * (if `GEMINI_API_KEY`), otherwise the deterministic local extractive provider.
  */
 export function getChatProvider(): ChatProvider {
-  const key = process.env.OPENAI_API_KEY?.trim();
-  if (key) return new OpenAIChatProvider(key);
+  const openai = process.env.OPENAI_API_KEY?.trim();
+  if (openai) return new OpenAIChatProvider(openai);
+  const gemini = process.env.GEMINI_API_KEY?.trim();
+  if (gemini) return new GeminiChatProvider(gemini);
   return new LocalChatProvider();
 }
