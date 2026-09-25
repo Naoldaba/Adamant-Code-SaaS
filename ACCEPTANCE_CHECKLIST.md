@@ -1,14 +1,14 @@
 # Knowledge Assistant Acceptance Checklist
 
 > Progress key: [x] done · [~] partial (phase in progress) · [ ] not started.
-> Phase 2 (Ingestion + admin Uploader) is complete; RAG chatbot and conversation
-> management are later phases.
+> Phases 2–6 are complete: ingestion + admin Uploader, RAG, conversation
+> management, and the Knowledge Assistant frontend (Chatbot + Uploader tabs).
 
 ## Access
 
 - [x] Knowledge Assistant in sidebar
 - [x] Authentication works (module lives under the `RequireAuth` dashboard layout)
-- [x] Chatbot tab (placeholder pending the RAG phase)
+- [x] Chatbot tab (live RAG chat with conversation history + citations)
 - [x] Knowledge Uploader tab
 - [x] Uploader is admin-only (UI gated by role + backend enforced)
 - [x] Backend authorization enforced (`requireRole("admin")`; 401/403 covered by tests)
@@ -56,12 +56,12 @@
 
 ## Frontend
 
-- [ ] Chat UI (placeholder only this phase)
-- [ ] Conversation sidebar
-- [x] Loading states (module page + uploader)
-- [x] Error states (upload/module ingest failures surfaced)
-- [x] Empty states (empty knowledge base message)
-- [ ] Citation UI
+- [x] Chat UI (ChatGPT-style thread with user/assistant bubbles + composer; Enter to send)
+- [x] Conversation sidebar (list own conversations, new/select/rename/delete, message counts)
+- [x] Loading states (conversation list, thread open, sending, module page + uploader)
+- [x] Error states (list/thread/upload/module ingest failures surfaced; provider failure shown as a clear thread error, never a fabricated answer)
+- [x] Empty states (empty conversation list, empty thread prompt, empty knowledge base message)
+- [x] Citation UI (per-assistant-message "Sources" with snippet + deep link to the originating module item)
 - [x] Uploader UI (file picker, format/size hints, module ingest)
 - [x] Ingestion results (per-file insert/update/skip/failure + per-line errors + history)
 

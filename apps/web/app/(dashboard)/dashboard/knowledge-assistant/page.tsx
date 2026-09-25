@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { Page } from "../../../../components/layout/Page";
-import { Card, CardBody, CardHeader } from "../../../../components/ui/Card";
+import { Card, CardBody } from "../../../../components/ui/Card";
 import { apiFetch } from "../../../../lib/apiClient";
 import { KnowledgeUploader } from "./KnowledgeUploader";
+import { Chatbot } from "./Chatbot";
 
 type MeUser = { id: string; email: string; name: string; role: "admin" | "member" };
 
@@ -46,15 +47,7 @@ export default function KnowledgeAssistantPage() {
       </div>
 
       {tab === "chatbot" ? (
-        <Card>
-          <CardHeader title="Chatbot" subtitle="Ask questions grounded in the shared knowledge base" />
-          <CardBody>
-            <div className="rounded-md bg-slate-50 border px-4 py-6 text-sm text-slate-500">
-              The RAG chatbot is coming in a later phase. For now, use the Knowledge Uploader tab to
-              populate the shared knowledge base by ingesting JSONL exports.
-            </div>
-          </CardBody>
-        </Card>
+        <Chatbot />
       ) : loading ? (
         <Card>
           <CardBody>
