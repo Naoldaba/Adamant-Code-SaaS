@@ -2,7 +2,8 @@ import express, { Router } from "express";
 import { z } from "zod";
 import { ApiError } from "../lib/errors.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { validateBody } from "../middleware/validate.js";
+import { validateBody, validateQuery } from "../middleware/validate.js";
+import { offsetLimit, paginationQuerySchema } from "../lib/pagination.js";
 import { parseJsonl } from "../lib/knowledge/parseJsonl.js";
 import { runIngestion } from "../lib/knowledge/ingest.js";
 import { KNOWLEDGE_TYPES } from "../lib/knowledge/normalize.js";
@@ -169,18 +170,63 @@ assistantRouter.get("/knowledge/documents", requireAuth, async (req, res, next) 
 // Conversations + RAG chat
 //
 // Conversations belong to the authenticated user; ownership is always enforced
-// against req.user.id (never a client-supplied id). Full conversation management
-// (list / rename / delete) is completed in the conversations phase; this phase
-// adds what the RAG answer flow requires: create, open (view messages +
-// citations), and ask.
+// against req.user.id (never a client-supplied id). Full lifecycle: create, list
+// (own, newest activity first), open (messages + citations), continue (ask),
+// rename, delete. Auto-naming happens on the first user message (see rag.ts).
 // ---------------------------------------------------------------------------
 
 const createConversationSchema = z.object({
   title: z.string().trim().min(1).max(200).optional()
 });
 
+const renameConversationSchema = z.object({
+  title: z.string().trim().min(1, "Title is required").max(200)
+});
+
 const askSchema = z.object({
   content: z.string().trim().min(1, "Message content is required").max(4000)
+});
+
+// GET /assistant/conversations — list the current user's conversations, ordered
+// by most recent activity. Scoped to req.user.id so a user only ever sees their
+// own conversations. Each row carries its message_count for the sidebar.
+assistantRouter.get("/conversations", requireAuth, validateQuery(paginationQuerySchema), async (req, res, next) => {
+  try {
+    const db = req.db!;
+    const q = req.query as unknown as z.infer<typeof paginationQuerySchema>;
+    const { offset, limit } = offsetLimit(q);
+
+    const totalRow = await db("conversations")
+      .where({ user_id: req.user!.id })
+      .count<{ count: string }[]>({ count: "*" })
+      .first();
+    const total = Number(totalRow?.count ?? 0);
+
+    const items = await db("conversations")
+      .select("id", "title", "created_at", "updated_at")
+      .where({ user_id: req.user!.id })
+      .orderBy("updated_at", "desc")
+      .offset(offset)
+      .limit(limit);
+
+    // Attach message counts with a single grouped query (mirrors the citation
+    // merge in the open endpoint) rather than an N+1 per conversation.
+    const ids = items.map((c) => c.id);
+    const countRows = ids.length
+      ? await db("messages")
+          .select("conversation_id")
+          .count<{ conversation_id: string; count: string }[]>({ count: "*" })
+          .whereIn("conversation_id", ids)
+          .groupBy("conversation_id")
+      : [];
+    const countByConversation = new Map(countRows.map((r) => [r.conversation_id, Number(r.count)]));
+
+    const withCounts = items.map((c) => ({ ...c, messageCount: countByConversation.get(c.id) ?? 0 }));
+
+    res.json({ data: { items: withCounts, page: q.page, pageSize: q.pageSize, total } });
+  } catch (e) {
+    next(e);
+  }
 });
 
 // POST /assistant/conversations — create a conversation for the current user.
@@ -295,3 +341,48 @@ assistantRouter.post(
     }
   }
 );
+
+// PATCH /assistant/conversations/:id — rename a conversation. Owner-only: the
+// update is scoped by user_id so another user cannot rename it, and a foreign or
+// missing conversation yields 404 (never leaks existence). updated_at is left
+// untouched so a rename does not reorder the activity-sorted list.
+assistantRouter.patch(
+  "/conversations/:id",
+  requireAuth,
+  validateBody(renameConversationSchema),
+  async (req, res, next) => {
+    try {
+      const db = req.db!;
+      const { title } = req.body as z.infer<typeof renameConversationSchema>;
+
+      const updated = await db("conversations")
+        .where({ id: req.params.id, user_id: req.user!.id })
+        .update({ title })
+        .returning<{ id: string; title: string; created_at: string; updated_at: string }[]>([
+          "id",
+          "title",
+          "created_at",
+          "updated_at"
+        ]);
+      if (!updated[0]) throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+
+      res.json({ data: { conversation: updated[0] } });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+// DELETE /assistant/conversations/:id — delete a conversation. Owner-only via the
+// user_id scope; messages and message_citations cascade (FK on delete cascade).
+assistantRouter.delete("/conversations/:id", requireAuth, async (req, res, next) => {
+  try {
+    const db = req.db!;
+    const deleted = await db("conversations").where({ id: req.params.id, user_id: req.user!.id }).del();
+    if (deleted === 0) throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+
+    res.json({ data: { id: req.params.id } });
+  } catch (e) {
+    next(e);
+  }
+});

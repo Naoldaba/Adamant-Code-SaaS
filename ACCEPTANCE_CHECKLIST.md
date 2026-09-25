@@ -39,16 +39,16 @@
 
 ## Conversations
 
-> The RAG phase adds the conversation endpoints the answer flow needs (create,
-> open, continue, auto-name, isolation, citations). List / rename / delete are
-> completed in the dedicated conversations phase.
+> The RAG phase added the endpoints the answer flow needs (create, open,
+> continue, auto-name, isolation, citations). The conversations phase completes
+> full lifecycle management: list, rename, delete.
 
 - [x] Create (`POST /assistant/conversations`)
-- [ ] List (conversations phase)
+- [x] List (`GET /assistant/conversations` — own only, newest activity first, message counts)
 - [x] Open (`GET /assistant/conversations/:id` — messages + citations)
 - [x] Continue (post further messages to an existing conversation)
-- [ ] Rename (conversations phase)
-- [ ] Delete (conversations phase)
+- [x] Rename (`PATCH /assistant/conversations/:id` — owner-scoped)
+- [x] Delete (`DELETE /assistant/conversations/:id` — owner-scoped; cascades messages/citations)
 - [x] Automatic name (title derived from the first question)
 - [x] Chronological messages (ordered by `created_at`)
 - [x] Per-user isolation (owner-only; foreign access → 404; verified by test)
@@ -67,7 +67,7 @@
 
 ## Quality
 
-- [x] Tests pass (42 hermetic unit tests + 14 DB-gated integration tests, all green)
+- [x] Tests pass (42 hermetic unit tests + 20 DB-gated integration tests, all green)
 - [x] Type check passes (`@ac/api` and `@ac/web`)
 - [ ] Lint passes (pre-existing: the scaffold's `next lint` script is removed in Next 16; not introduced by this phase)
 - [x] Migrations work (verified via `migrate:latest` on pgvector in integration setup and in `docker compose up`)

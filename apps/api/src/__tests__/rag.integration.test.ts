@@ -72,6 +72,12 @@ suite("RAG chat integration", () => {
     otherId = other.id;
     otherCookie = other.cookie;
 
+    // Purge any documents left behind by a prior run of this suite. The test DB is
+    // persistent and shared, and each run ingests a fresh rag-widget-<uuid> doc; a
+    // stale one from an earlier run could otherwise outrank this run's doc and
+    // break the exact source_id assertion. Chunks/citations cascade on delete.
+    await db("kb_documents").where("source_id", "like", "rag-widget-%").del();
+
     // Ingest a document on a distinctive topic the chatbot can ground against.
     const ingest = await request(app)
       .post("/assistant/knowledge/ingest?filename=docs.jsonl")
@@ -88,7 +94,11 @@ suite("RAG chat integration", () => {
   }, 60_000);
 
   afterAll(async () => {
-    if (db) await db.destroy();
+    // Leave the shared test DB clean so the next run starts without stale docs.
+    if (db) {
+      await db("kb_documents").where("source_id", "like", "rag-widget-%").del();
+      await db.destroy();
+    }
   });
 
   it("answers a relevant question and returns citations that map to a real stored document", async () => {
