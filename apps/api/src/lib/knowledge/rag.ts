@@ -11,6 +11,10 @@ import { INSUFFICIENT_KNOWLEDGE_MESSAGE, type ChatMessage, type RetrievedContext
 const CITATION_SNIPPET_CHARS = 300;
 const AUTO_NAME_MAX_CHARS = 60;
 const DEFAULT_CONVERSATION_TITLE = "New conversation";
+// Cap how many prior turns are replayed into the grounded prompt. Without a bound
+// a long conversation grows the prompt until it hits the provider's context/cost
+// limits (and starts failing); the most recent turns carry the relevant context.
+const MAX_HISTORY_MESSAGES = 10;
 
 export type PersistedMessage = {
   id: string;
@@ -222,8 +226,10 @@ async function loadHistory(db: Knex, conversationId: string, excludeMessageId: s
     .select("role", "content")
     .where({ conversation_id: conversationId, status: "complete" })
     .whereNot({ id: excludeMessageId })
-    .orderBy("created_at", "asc");
+    .orderBy("created_at", "desc")
+    .limit(MAX_HISTORY_MESSAGES);
   return rows
     .filter((r) => r.role === "user" || r.role === "assistant")
-    .map((r) => ({ role: r.role as "user" | "assistant", content: r.content }));
+    .map((r) => ({ role: r.role as "user" | "assistant", content: r.content }))
+    .reverse();
 }

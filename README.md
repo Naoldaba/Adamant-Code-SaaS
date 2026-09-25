@@ -203,6 +203,14 @@ When `OPENAI_API_KEY` is set, an OpenAI-backed provider is used for both embeddi
 generation instead. Embeddings are stored in a pgvector `vector(EMBEDDING_DIM)` column and
 searched by cosine similarity.
 
+> **Note on the keyless default:** without an `OPENAI_API_KEY`, the local answer
+> provider is *extractive* — it returns the relevant retrieved chunks verbatim with
+> `[n]` markers rather than a synthesized natural-language answer. This keeps the
+> assistant fully grounded and reproducible with no external dependency (which is what
+> `docker compose up` and the tests rely on). Set `OPENAI_API_KEY` to get synthesized
+> answers; the retrieval, citation, insufficient-knowledge, and provider-failure
+> behavior is identical either way.
+
 **RAG chat behavior**
 
 - **Grounded answers** — a question is embedded and matched against stored chunks by cosine
@@ -279,6 +287,11 @@ failure not stored as successful, and per-user conversation isolation):
 DATABASE_URL_TEST=postgres://postgres:postgres@localhost:5432/ac_test npm --workspace @ac/api test
 ```
 
+> **Lint:** `@ac/web`'s `lint` script still calls `next lint`, which Next 16 removed,
+> so `npm run lint` errors out. This is a pre-existing scaffold/tooling issue unrelated
+> to the Knowledge Assistant feature; typecheck (`npm run typecheck`) and the test
+> suites are the quality gates used here.
+
 ## Environment Variables
 
 See `env.example` for the full list. Knowledge Assistant additions:
@@ -288,7 +301,7 @@ See `env.example` for the full list. Knowledge Assistant additions:
 | `EMBEDDING_DIM` | `1536` | Embedding vector dimension (must match the migration and provider) |
 | `KB_MAX_UPLOAD_MB` | `5` | Maximum Knowledge Uploader file size in MB |
 | `RAG_TOP_K` | `6` | Number of chunks retrieved per question before relevance filtering |
-| `RAG_MIN_SCORE` | `0.1` | Minimum cosine similarity for a chunk to be considered relevant |
+| `RAG_MIN_SCORE` | `0.2` | Minimum cosine similarity for a chunk to be considered relevant |
 | `OPENAI_API_KEY` | _(unset)_ | Optional; when set, OpenAI is used for embeddings + answer generation instead of the local provider |
 | `OPENAI_MODEL` | `gpt-4.1-mini` | Chat model used when `OPENAI_API_KEY` is set |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model used when `OPENAI_API_KEY` is set |

@@ -199,6 +199,28 @@ suite("Conversation management integration", () => {
     expect(row.title).toBe("Owned by user");
   });
 
+  it("treats a malformed conversation id as not found (404, not a 500)", async () => {
+    const badId = "not-a-uuid";
+    const open = await request(app).get(`/assistant/conversations/${badId}`).set("Cookie", userCookie);
+    expect(open.status).toBe(404);
+    expect(open.body.error.code).toBe("NOT_FOUND");
+
+    const rename = await request(app)
+      .patch(`/assistant/conversations/${badId}`)
+      .set("Cookie", userCookie)
+      .send({ title: "x" });
+    expect(rename.status).toBe(404);
+
+    const del = await request(app).delete(`/assistant/conversations/${badId}`).set("Cookie", userCookie);
+    expect(del.status).toBe(404);
+
+    const ask = await request(app)
+      .post(`/assistant/conversations/${badId}/messages`)
+      .set("Cookie", userCookie)
+      .send({ content: QUESTION });
+    expect(ask.status).toBe(404);
+  });
+
   it("requires authentication for list, rename, and delete", async () => {
     const id = await newConversation(userCookie);
     expect((await request(app).get("/assistant/conversations")).status).toBe(401);

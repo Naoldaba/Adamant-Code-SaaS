@@ -2,9 +2,9 @@ import express, { Router } from "express";
 import { z } from "zod";
 import { ApiError } from "../lib/errors.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { validateBody, validateQuery } from "../middleware/validate.js";
+import { requireUuidParam, validateBody, validateQuery } from "../middleware/validate.js";
 import { offsetLimit, paginationQuerySchema } from "../lib/pagination.js";
-import { parseJsonl } from "../lib/knowledge/parseJsonl.js";
+import { parseJsonl, type LineError } from "../lib/knowledge/parseJsonl.js";
 import { runIngestion } from "../lib/knowledge/ingest.js";
 import { KNOWLEDGE_TYPES } from "../lib/knowledge/normalize.js";
 import { maxUploadBytes, validateUpload } from "../lib/knowledge/uploadValidation.js";
@@ -38,6 +38,22 @@ function ingestionResponse(result: {
       errors: result.errors
     }
   };
+}
+
+// A run that completes (even with skipped/failed lines) is a 200 success carrying
+// the full per-line report. A run that could not complete (transaction rolled
+// back) is surfaced as a 502 error in the standard { error } envelope, with the
+// underlying reason, so the client shows a real message instead of a generic
+// status code. Either way the run is recorded in the ingestions history.
+function sendIngestionResult(
+  res: express.Response,
+  result: { ingestionId: string; status: "succeeded" | "failed"; stats: unknown; errors: LineError[] }
+): void {
+  if (result.status !== "succeeded") {
+    const detail = result.errors.length > 0 ? result.errors[result.errors.length - 1].error : "Ingestion failed";
+    throw new ApiError(502, "INTERNAL_ERROR", `Ingestion failed: ${detail}`);
+  }
+  res.status(200).json({ data: ingestionResponse(result) });
 }
 
 // POST /assistant/knowledge/ingest?filename=foo.jsonl — admin-only file upload.
@@ -79,8 +95,7 @@ assistantRouter.post(
         uploadedBy: req.user!.id
       });
 
-      const status = result.status === "succeeded" ? 200 : 502;
-      res.status(status).json({ data: ingestionResponse(result) });
+      sendIngestionResult(res, result);
     } catch (e) {
       next(e);
     }
@@ -118,8 +133,7 @@ assistantRouter.post(
         uploadedBy: req.user!.id
       });
 
-      const status = result.status === "succeeded" ? 200 : 502;
-      res.status(status).json({ data: ingestionResponse(result) });
+      sendIngestionResult(res, result);
     } catch (e) {
       next(e);
     }
@@ -254,7 +268,7 @@ assistantRouter.post("/conversations", requireAuth, validateBody(createConversat
 
 // GET /assistant/conversations/:id — open a conversation: messages in
 // chronological order, each with its citations. Owner-only.
-assistantRouter.get("/conversations/:id", requireAuth, async (req, res, next) => {
+assistantRouter.get("/conversations/:id", requireAuth, requireUuidParam("id", "Conversation not found"), async (req, res, next) => {
   try {
     const db = req.db!;
     const conversation = await db("conversations")
@@ -312,6 +326,7 @@ assistantRouter.get("/conversations/:id", requireAuth, async (req, res, next) =>
 assistantRouter.post(
   "/conversations/:id/messages",
   requireAuth,
+  requireUuidParam("id", "Conversation not found"),
   validateBody(askSchema),
   async (req, res, next) => {
     try {
@@ -349,6 +364,7 @@ assistantRouter.post(
 assistantRouter.patch(
   "/conversations/:id",
   requireAuth,
+  requireUuidParam("id", "Conversation not found"),
   validateBody(renameConversationSchema),
   async (req, res, next) => {
     try {
@@ -375,7 +391,7 @@ assistantRouter.patch(
 
 // DELETE /assistant/conversations/:id — delete a conversation. Owner-only via the
 // user_id scope; messages and message_citations cascade (FK on delete cascade).
-assistantRouter.delete("/conversations/:id", requireAuth, async (req, res, next) => {
+assistantRouter.delete("/conversations/:id", requireAuth, requireUuidParam("id", "Conversation not found"), async (req, res, next) => {
   try {
     const db = req.db!;
     const deleted = await db("conversations").where({ id: req.params.id, user_id: req.user!.id }).del();

@@ -137,9 +137,13 @@ export function Chatbot() {
     setMessages((prev) => [...prev, optimistic]);
     setInput("");
 
+    // Declared outside the try so the catch can re-sync the correct conversation,
+    // including one just created lazily in this same call (activeId is still stale
+    // in this closure at that point).
+    let conversationId = activeId;
+
     try {
       // Create the conversation lazily on the first message of a draft chat.
-      let conversationId = activeId;
       if (!conversationId) {
         const created = await apiFetch<{ conversation: { id: string } }>("/assistant/conversations", {
           method: "POST",
@@ -177,7 +181,7 @@ export function Chatbot() {
       // surface a clear error rather than a fabricated answer.
       setThreadError(e instanceof Error ? e.message : "Failed to get an answer");
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
-      if (activeId) await openConversation(activeId);
+      if (conversationId) await openConversation(conversationId);
       await loadConversations();
     } finally {
       setSending(false);

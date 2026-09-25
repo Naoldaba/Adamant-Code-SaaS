@@ -172,7 +172,6 @@ export interface ChatProvider {
   generateAnswer(input: GenerateAnswerInput): Promise<{ text: string }>;
 }
 
-const LOCAL_ANSWER_MAX_CONTEXTS = 3;
 const LOCAL_ANSWER_SNIPPET_CHARS = 600;
 
 /**
@@ -186,7 +185,10 @@ export class LocalChatProvider implements ChatProvider {
   public readonly name = "local";
 
   async generateAnswer(input: GenerateAnswerInput): Promise<{ text: string }> {
-    const top = input.contexts.slice(0, LOCAL_ANSWER_MAX_CONTEXTS);
+    // Use every retrieved context so the answer's [n] markers line up exactly with
+    // the persisted citations (the caller passes the same deduped, top-K contexts
+    // it will store as message_citations).
+    const top = input.contexts;
     const parts = top.map((c, i) => {
       const snippet = c.content.trim().slice(0, LOCAL_ANSWER_SNIPPET_CHARS);
       return `[${i + 1}] ${snippet}`;
