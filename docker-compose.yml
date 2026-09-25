@@ -33,6 +33,13 @@ services:
       EMBEDDING_DIM: "1536"
       # Max Knowledge Uploader file size in MB (oversized uploads are rejected).
       KB_MAX_UPLOAD_MB: "5"
+      # RAG retrieval tuning: chunks pulled per question, and the minimum cosine
+      # similarity for a chunk to count as relevant.
+      RAG_TOP_K: "6"
+      RAG_MIN_SCORE: "0.1"
+      # Optional: set OPENAI_API_KEY to use OpenAI for embeddings + generation.
+      # Left unset here so the deterministic local provider runs with no secret.
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
     ports:
       - "4000:4000"
     depends_on:

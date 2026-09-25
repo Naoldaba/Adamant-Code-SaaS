@@ -29,26 +29,30 @@
 
 ## RAG
 
-- [ ] Relevant questions answered
-- [ ] Answers grounded in KB
-- [ ] Citations returned
-- [ ] Citations map to real sources
-- [ ] Insufficient knowledge handled
-- [ ] Provider failure handled
-- [ ] Failed/partial answer not stored as successful
+- [x] Relevant questions answered (`POST /assistant/conversations/:id/messages`)
+- [x] Answers grounded in KB (answer generated only from retrieved chunks; strict system prompt)
+- [x] Citations returned (per assistant message, from the retrieved contexts)
+- [x] Citations map to real sources (link to `kb_documents`/`kb_chunks`; snapshot `source_type`/`source_id` = original `knowledge_items.id`)
+- [x] Insufficient knowledge handled (relevance threshold → explicit non-answer, no citations)
+- [x] Provider failure handled (`502`; assistant turn stored as `error`, never `complete`)
+- [x] Failed/partial answer not stored as successful (verified by integration test)
 
 ## Conversations
 
-- [ ] Create
-- [ ] List
-- [ ] Open
-- [ ] Continue
-- [ ] Rename
-- [ ] Delete
-- [ ] Automatic name
-- [ ] Chronological messages
-- [ ] Per-user isolation
-- [ ] Citations preserved
+> The RAG phase adds the conversation endpoints the answer flow needs (create,
+> open, continue, auto-name, isolation, citations). List / rename / delete are
+> completed in the dedicated conversations phase.
+
+- [x] Create (`POST /assistant/conversations`)
+- [ ] List (conversations phase)
+- [x] Open (`GET /assistant/conversations/:id` — messages + citations)
+- [x] Continue (post further messages to an existing conversation)
+- [ ] Rename (conversations phase)
+- [ ] Delete (conversations phase)
+- [x] Automatic name (title derived from the first question)
+- [x] Chronological messages (ordered by `created_at`)
+- [x] Per-user isolation (owner-only; foreign access → 404; verified by test)
+- [x] Citations preserved (stored in `message_citations`, returned on open)
 
 ## Frontend
 
@@ -63,7 +67,7 @@
 
 ## Quality
 
-- [x] Tests pass (35 hermetic unit tests + 8 DB-gated integration tests, all green)
+- [x] Tests pass (42 hermetic unit tests + 14 DB-gated integration tests, all green)
 - [x] Type check passes (`@ac/api` and `@ac/web`)
 - [ ] Lint passes (pre-existing: the scaffold's `next lint` script is removed in Next 16; not introduced by this phase)
 - [x] Migrations work (verified via `migrate:latest` on pgvector in integration setup and in `docker compose up`)

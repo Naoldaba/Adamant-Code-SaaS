@@ -164,8 +164,8 @@ Valid types: `docs`, `policies`, `api_reference`, `changelog`, `incidents`, `sup
 ### Knowledge Assistant Endpoints
 
 The Knowledge Assistant module (sidebar → **Knowledge Assistant**) has two tabs: a
-**Chatbot** (RAG, added in a later phase) and an admin-only **Knowledge Uploader**
-that ingests JSONL/NDJSON exports into a single shared/global knowledge base.
+**Chatbot** (RAG) and an admin-only **Knowledge Uploader** that ingests JSONL/NDJSON
+exports into a single shared/global knowledge base.
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
@@ -173,6 +173,9 @@ that ingests JSONL/NDJSON exports into a single shared/global knowledge base.
 | POST | `/assistant/knowledge/ingest/from-module/:type` | admin | Ingest an existing module directly from the DB |
 | GET | `/assistant/knowledge/ingestions` | admin | Ingestion run history (counts + per-line errors) |
 | GET | `/assistant/knowledge/documents` | authenticated | Ingested knowledge base summary (counts + totals) |
+| POST | `/assistant/conversations` | authenticated | Create a conversation (owned by the current user) |
+| GET | `/assistant/conversations/:id` | owner | Open a conversation: messages (chronological) + citations |
+| POST | `/assistant/conversations/:id/messages` | owner | Ask a question (RAG); returns the grounded answer + citations |
 
 **Ingestion behavior**
 
@@ -193,10 +196,30 @@ that ingests JSONL/NDJSON exports into a single shared/global knowledge base.
 The upload file is sent as the raw request body with `Content-Type: text/plain` (the
 filename travels as the `filename` query parameter), so no multipart dependency is required.
 
-**Embeddings / provider** — chunk embeddings are produced by a pluggable provider. Phase 2
-ships a deterministic, offline **local** provider (feature-hashed, L2-normalized vectors of
-`EMBEDDING_DIM` dimensions) so ingestion works with no API key. Embeddings are stored in a
-pgvector `vector(EMBEDDING_DIM)` column for later similarity search.
+**Embeddings / provider** — chunk embeddings are produced by a pluggable provider. A
+deterministic, offline **local** provider (feature-hashed, L2-normalized vectors of
+`EMBEDDING_DIM` dimensions) is used by default so ingestion and chat work with no API key.
+When `OPENAI_API_KEY` is set, an OpenAI-backed provider is used for both embeddings and
+generation instead. Embeddings are stored in a pgvector `vector(EMBEDDING_DIM)` column and
+searched by cosine similarity.
+
+**RAG chat behavior**
+
+- **Grounded answers** — a question is embedded and matched against stored chunks by cosine
+  similarity; only chunks clearing `RAG_MIN_SCORE` (relevance filtering) are used. The answer
+  is generated strictly from those retrieved chunks — the assistant does not fabricate.
+- **Citations** — every grounded answer stores `message_citations` that snapshot the source
+  (`source_type`, `source_id` = original `knowledge_items.id`, title, score, snippet) and link
+  to the real `kb_documents`/`kb_chunks`, so each citation maps back to its originating module
+  item even after re-ingestion.
+- **Insufficient knowledge** — if nothing clears the relevance threshold, the assistant returns
+  an explicit "not in the knowledge base — try ingesting the source material" response with **no
+  citations**, rather than guessing.
+- **Provider failure** — if the answer provider fails or times out, the endpoint returns `502`
+  and the assistant turn is recorded with `status = "error"` (never `complete`); a failed or
+  partial answer is never stored or returned as successful.
+- **Conversations** — belong to the authenticated user (ownership enforced on every endpoint via
+  the session, never a client-supplied id); the title is auto-generated from the first question.
 
 ## Project Structure
 
@@ -245,9 +268,11 @@ The default test run is hermetic (no database required) and covers JSONL parsing
 upload validation, metadata flattening, chunking, deduplication decisions, and the
 local embedding provider.
 
-Additional HTTP-level integration tests (auth enforcement, full ingestion lifecycle,
-deduplication counts, searchable-after-success) run against a real pgvector Postgres
-when `DATABASE_URL_TEST` is set; otherwise they are skipped:
+Additional HTTP-level integration tests run against a real pgvector Postgres when
+`DATABASE_URL_TEST` is set; otherwise they are skipped. They cover auth enforcement, the
+full ingestion lifecycle, deduplication counts, searchable-after-success, and the RAG chat
+path (grounded answer + citations mapping to real sources, insufficient knowledge, provider
+failure not stored as successful, and per-user conversation isolation):
 
 ```bash
 # start a throwaway pgvector database, then:
@@ -262,7 +287,11 @@ See `env.example` for the full list. Knowledge Assistant additions:
 |----------|---------|-------------|
 | `EMBEDDING_DIM` | `1536` | Embedding vector dimension (must match the migration and provider) |
 | `KB_MAX_UPLOAD_MB` | `5` | Maximum Knowledge Uploader file size in MB |
-| `OPENAI_API_KEY` | _(unset)_ | Optional; reserved for the OpenAI provider (RAG phase) |
+| `RAG_TOP_K` | `6` | Number of chunks retrieved per question before relevance filtering |
+| `RAG_MIN_SCORE` | `0.1` | Minimum cosine similarity for a chunk to be considered relevant |
+| `OPENAI_API_KEY` | _(unset)_ | Optional; when set, OpenAI is used for embeddings + answer generation instead of the local provider |
+| `OPENAI_MODEL` | `gpt-4.1-mini` | Chat model used when `OPENAI_API_KEY` is set |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model used when `OPENAI_API_KEY` is set |
 
 ## License
 

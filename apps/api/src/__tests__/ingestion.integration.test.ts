@@ -1,10 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import request from "supertest";
-import knexLib, { type Knex } from "knex";
+import { type Knex } from "knex";
 import crypto from "node:crypto";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { createApp } from "../app.js";
+import { connectAndMigrate } from "./helpers/testDb.js";
 
 /**
  * HTTP-level ingestion tests against a real Postgres (pgvector) test database.
@@ -16,9 +15,6 @@ import { createApp } from "../app.js";
  */
 const TEST_DB = process.env.DATABASE_URL_TEST;
 const suite = TEST_DB ? describe : describe.skip;
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const migrationsDir = path.resolve(__dirname, "../../../../packages/db/migrations");
 
 function exportLine(o: Record<string, unknown>): string {
   return JSON.stringify({
@@ -60,12 +56,7 @@ suite("Ingestion HTTP integration", () => {
   }
 
   beforeAll(async () => {
-    db = knexLib({
-      client: "pg",
-      connection: TEST_DB,
-      migrations: { directory: migrationsDir }
-    });
-    await db.migrate.latest();
+    db = await connectAndMigrate(TEST_DB!);
     app = createApp(db);
     adminCookie = await createUserWithSession("admin");
     memberCookie = await createUserWithSession("member");

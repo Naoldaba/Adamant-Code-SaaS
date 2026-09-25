@@ -1,10 +1,14 @@
 import express, { Router } from "express";
+import { z } from "zod";
 import { ApiError } from "../lib/errors.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { validateBody } from "../middleware/validate.js";
 import { parseJsonl } from "../lib/knowledge/parseJsonl.js";
 import { runIngestion } from "../lib/knowledge/ingest.js";
 import { KNOWLEDGE_TYPES } from "../lib/knowledge/normalize.js";
 import { maxUploadBytes, validateUpload } from "../lib/knowledge/uploadValidation.js";
+import { createAnswer, toCitationOut } from "../lib/knowledge/rag.js";
+import { ProviderError } from "../lib/knowledge/provider.js";
 
 export const assistantRouter = Router();
 
@@ -160,3 +164,134 @@ assistantRouter.get("/knowledge/documents", requireAuth, async (req, res, next) 
     next(e);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Conversations + RAG chat
+//
+// Conversations belong to the authenticated user; ownership is always enforced
+// against req.user.id (never a client-supplied id). Full conversation management
+// (list / rename / delete) is completed in the conversations phase; this phase
+// adds what the RAG answer flow requires: create, open (view messages +
+// citations), and ask.
+// ---------------------------------------------------------------------------
+
+const createConversationSchema = z.object({
+  title: z.string().trim().min(1).max(200).optional()
+});
+
+const askSchema = z.object({
+  content: z.string().trim().min(1, "Message content is required").max(4000)
+});
+
+// POST /assistant/conversations — create a conversation for the current user.
+assistantRouter.post("/conversations", requireAuth, validateBody(createConversationSchema), async (req, res, next) => {
+  try {
+    const db = req.db!;
+    const body = req.body as z.infer<typeof createConversationSchema>;
+    const insert: Record<string, unknown> = { user_id: req.user!.id };
+    if (body.title) insert.title = body.title;
+
+    const [conversation] = await db("conversations")
+      .insert(insert)
+      .returning<{ id: string; title: string; created_at: string; updated_at: string }[]>([
+        "id",
+        "title",
+        "created_at",
+        "updated_at"
+      ]);
+
+    res.status(201).json({ data: { conversation } });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /assistant/conversations/:id — open a conversation: messages in
+// chronological order, each with its citations. Owner-only.
+assistantRouter.get("/conversations/:id", requireAuth, async (req, res, next) => {
+  try {
+    const db = req.db!;
+    const conversation = await db("conversations")
+      .select("id", "user_id", "title", "created_at", "updated_at")
+      .where({ id: req.params.id })
+      .first();
+    if (!conversation || conversation.user_id !== req.user!.id) {
+      throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+    }
+
+    const messages = await db("messages")
+      .select("id", "role", "content", "status", "created_at")
+      .where({ conversation_id: conversation.id })
+      .orderBy("created_at", "asc");
+
+    const messageIds = messages.map((m) => m.id);
+    const citationRows = messageIds.length
+      ? await db("message_citations")
+          .select(
+            "id",
+            "message_id",
+            "document_id",
+            "chunk_id",
+            "source_type",
+            "source_id",
+            "title",
+            "score",
+            "snippet"
+          )
+          .whereIn("message_id", messageIds)
+          .orderBy("score", "desc")
+      : [];
+
+    const citationsByMessage = new Map<string, ReturnType<typeof toCitationOut>[]>();
+    for (const row of citationRows) {
+      const list = citationsByMessage.get(row.message_id) ?? [];
+      list.push(toCitationOut(row));
+      citationsByMessage.set(row.message_id, list);
+    }
+
+    const withCitations = messages.map((m) => ({
+      ...m,
+      citations: citationsByMessage.get(m.id) ?? []
+    }));
+
+    const { user_id: _omit, ...conversationOut } = conversation;
+    res.json({ data: { conversation: conversationOut, messages: withCitations } });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /assistant/conversations/:id/messages — ask a question (RAG). Owner-only.
+// On provider failure returns 502 and does not persist a successful answer.
+assistantRouter.post(
+  "/conversations/:id/messages",
+  requireAuth,
+  validateBody(askSchema),
+  async (req, res, next) => {
+    try {
+      const db = req.db!;
+      const { content } = req.body as z.infer<typeof askSchema>;
+
+      const result = await createAnswer(db, {
+        conversationId: req.params.id,
+        userId: req.user!.id,
+        question: content
+      });
+      if (result === null) throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+
+      res.status(201).json({
+        data: {
+          userMessage: result.userMessage,
+          message: result.message,
+          citations: result.citations,
+          insufficient: result.insufficient
+        }
+      });
+    } catch (e) {
+      if (e instanceof ProviderError) {
+        return next(new ApiError(502, "INTERNAL_ERROR", "The answer provider failed. Please try again."));
+      }
+      next(e);
+    }
+  }
+);
