@@ -22,7 +22,8 @@ export interface EmbeddingProvider {
 }
 
 export function embeddingDimension(): number {
-  const dim = Number(process.env.EMBEDDING_DIM ?? 1536);
+  // Default is 768 to match the migration column default and docker-compose.yml.
+  const dim = Number(process.env.EMBEDDING_DIM ?? 768);
   if (!Number.isInteger(dim) || dim <= 0) {
     throw new Error(`EMBEDDING_DIM must be a positive integer (got: ${process.env.EMBEDDING_DIM})`);
   }

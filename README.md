@@ -309,7 +309,7 @@ See `env.example` for the full list. Knowledge Assistant additions:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMBEDDING_DIM` | `768` | Embedding vector dimension (must match the migration column and provider; 768 = Gemini `text-embedding-004`, also valid for local/OpenAI) |
+| `EMBEDDING_DIM` | `768` | Embedding vector dimension (must match the migration column and provider; 768 = Gemini `gemini-embedding-001`, also valid for local/OpenAI) |
 | `KB_MAX_UPLOAD_MB` | `5` | Maximum Knowledge Uploader file size in MB |
 | `RAG_TOP_K` | `6` | Number of chunks retrieved per question before relevance filtering |
 | `RAG_MIN_SCORE` | `0.1` | Minimum cosine similarity for a chunk to be considered relevant (tuned for the offline local provider, whose scores are low/compressed; raise it when using a real embedding provider) |

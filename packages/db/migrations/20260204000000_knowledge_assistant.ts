@@ -1,9 +1,11 @@
 import type { Knex } from "knex";
 
-// Embedding dimension is fixed per deployment. Default matches OpenAI
-// `text-embedding-3-small` (1536); the deterministic local provider emits the
-// same dimension so the column type is stable regardless of provider.
-const EMBEDDING_DIM = Number(process.env.EMBEDDING_DIM ?? 1536);
+// Embedding dimension is fixed per deployment. Default is 768 to match the value
+// set in docker-compose.yml (the Gemini `gemini-embedding-001` output dim), so a
+// migrate run outside Docker produces the same column type; the deterministic
+// local provider and OpenAI (via its `dimensions` param) also emit this dimension,
+// so the column type is stable regardless of provider.
+const EMBEDDING_DIM = Number(process.env.EMBEDDING_DIM ?? 768);
 
 export async function up(knex: Knex): Promise<void> {
   if (!Number.isInteger(EMBEDDING_DIM) || EMBEDDING_DIM <= 0) {
