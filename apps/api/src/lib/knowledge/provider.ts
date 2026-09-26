@@ -247,10 +247,63 @@ export type GenerateAnswerInput = {
  * Answer-generation abstraction. The RAG orchestrator calls this only after
  * retrieval has produced at least one relevant context, so implementations can
  * assume `contexts` is non-empty and must ground their answer in it.
+ *
+ * `generateAnswerStream` is optional: when present it yields the answer in
+ * incremental text deltas (the concatenation equals `generateAnswer`'s output) so
+ * the transport can stream tokens to the client. An `AbortSignal` lets the caller
+ * stop generation early (e.g. the client disconnected). Providers without it are
+ * driven through `streamChatAnswer`, which falls back to a single delta.
  */
 export interface ChatProvider {
   readonly name: string;
   generateAnswer(input: GenerateAnswerInput): Promise<{ text: string }>;
+  generateAnswerStream?(input: GenerateAnswerInput, signal?: AbortSignal): AsyncIterable<string>;
+}
+
+/**
+ * Drive any `ChatProvider` as a stream of text deltas. If the provider implements
+ * `generateAnswerStream` it is used directly; otherwise its one-shot
+ * `generateAnswer` result is yielded as a single delta. This lets the streaming
+ * RAG path treat every provider (and test doubles) uniformly.
+ */
+export async function* streamChatAnswer(
+  provider: ChatProvider,
+  input: GenerateAnswerInput,
+  signal?: AbortSignal
+): AsyncGenerator<string> {
+  if (provider.generateAnswerStream) {
+    yield* provider.generateAnswerStream(input, signal);
+    return;
+  }
+  const { text } = await provider.generateAnswer(input);
+  if (signal?.aborted) return;
+  yield text;
+}
+
+/**
+ * Yield the payload of each `data:` line from an SSE response body, decoding the
+ * stream incrementally so tokens surface as they arrive. Shared by the streaming
+ * chat providers. A connection that breaks mid-stream throws, which the caller
+ * normalizes to a `ProviderError` (so a partial answer is never treated as
+ * successful); an aborted signal ends iteration quietly.
+ */
+async function* sseDataLines(res: Response, signal?: AbortSignal): AsyncGenerator<string> {
+  const body = res.body;
+  if (!body) throw new ProviderError("Answer provider returned no response body");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  // Node's undici `fetch` body is an async-iterable ReadableStream at runtime, but
+  // the DOM lib type does not declare Symbol.asyncIterator.
+  for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
+    if (signal?.aborted) return;
+    buffer += decoder.decode(chunk, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, nl).replace(/\r$/, "");
+      buffer = buffer.slice(nl + 1);
+      if (line.startsWith("data:")) yield line.slice(5).trimStart();
+    }
+  }
 }
 
 const LOCAL_ANSWER_SNIPPET_CHARS = 600;
@@ -277,6 +330,21 @@ export class LocalChatProvider implements ChatProvider {
     const sources = top.map((c, i) => `[${i + 1}] ${c.title} (${c.sourceType})`).join("\n");
     const text = `Based on the knowledge base:\n\n${parts.join("\n\n")}\n\nSources:\n${sources}`;
     return { text };
+  }
+
+  /**
+   * Stream the extractive answer in small word-grouped deltas so the UI shows
+   * incremental generation even with no API key. The deltas concatenate back to
+   * exactly `generateAnswer`'s output, so citations and persisted content are
+   * identical to the non-streaming path.
+   */
+  async *generateAnswerStream(input: GenerateAnswerInput, signal?: AbortSignal): AsyncGenerator<string> {
+    const { text } = await this.generateAnswer(input);
+    const tokens = text.match(/\S+\s*/g) ?? (text ? [text] : []);
+    for (const token of tokens) {
+      if (signal?.aborted) return;
+      yield token;
+    }
   }
 }
 
@@ -321,6 +389,54 @@ export class OpenAIChatProvider implements ChatProvider {
     const text = json.choices?.[0]?.message?.content?.trim();
     if (!text) throw new ProviderError("Answer provider returned an empty response");
     return { text };
+  }
+
+  /**
+   * Streaming variant: same grounded prompt, `stream: true`, parsing the
+   * `chat.completions` SSE deltas (`choices[0].delta.content`). Transport/API
+   * failures become `ProviderError`; an aborted signal (client disconnect) ends
+   * quietly without raising.
+   */
+  async *generateAnswerStream(input: GenerateAnswerInput, signal?: AbortSignal): AsyncGenerator<string> {
+    const messages = buildGroundedPrompt(input.question, input.contexts, input.history);
+    let res: Response;
+    try {
+      res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
+        body: JSON.stringify({ model: this.model, messages, temperature: 0, stream: true }),
+        signal
+      });
+    } catch (e) {
+      if (signal?.aborted) return;
+      throw new ProviderError("Answer provider request failed", e);
+    }
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new ProviderError(`Answer provider returned ${res.status}: ${detail.slice(0, 200)}`);
+    }
+
+    let emitted = false;
+    try {
+      for await (const data of sseDataLines(res, signal)) {
+        if (data === "[DONE]") break;
+        let json: { choices?: { delta?: { content?: string } }[] };
+        try {
+          json = JSON.parse(data) as typeof json;
+        } catch {
+          continue;
+        }
+        const piece = json.choices?.[0]?.delta?.content;
+        if (piece) {
+          emitted = true;
+          yield piece;
+        }
+      }
+    } catch (e) {
+      if (signal?.aborted) return;
+      throw new ProviderError("Answer provider stream failed", e);
+    }
+    if (!emitted && !signal?.aborted) throw new ProviderError("Answer provider returned an empty response");
   }
 }
 
@@ -380,6 +496,63 @@ export class GeminiChatProvider implements ChatProvider {
       .trim();
     if (!text) throw new ProviderError("Answer provider returned an empty response");
     return { text };
+  }
+
+  /**
+   * Streaming variant using `streamGenerateContent?alt=sse`, which emits the same
+   * candidate shape per SSE `data:` line. Transport/API failures become
+   * `ProviderError`; an aborted signal (client disconnect) ends quietly.
+   */
+  async *generateAnswerStream(input: GenerateAnswerInput, signal?: AbortSignal): AsyncGenerator<string> {
+    const messages = buildGroundedPrompt(input.question, input.contexts, input.history);
+    const system = messages.find((m) => m.role === "system")?.content;
+    const contents = messages
+      .filter((m) => m.role !== "system")
+      .map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }));
+
+    const body: Record<string, unknown> = { contents, generationConfig: { temperature: 0 } };
+    if (system) body.systemInstruction = { parts: [{ text: system }] };
+
+    let res: Response;
+    try {
+      res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/${this.model}:streamGenerateContent?alt=sse&key=${this.apiKey}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+          signal
+        }
+      );
+    } catch (e) {
+      if (signal?.aborted) return;
+      throw new ProviderError("Answer provider request failed", e);
+    }
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new ProviderError(`Answer provider returned ${res.status}: ${detail.slice(0, 200)}`);
+    }
+
+    let emitted = false;
+    try {
+      for await (const data of sseDataLines(res, signal)) {
+        let json: { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+        try {
+          json = JSON.parse(data) as typeof json;
+        } catch {
+          continue;
+        }
+        const piece = json.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("");
+        if (piece) {
+          emitted = true;
+          yield piece;
+        }
+      }
+    } catch (e) {
+      if (signal?.aborted) return;
+      throw new ProviderError("Answer provider stream failed", e);
+    }
+    if (!emitted && !signal?.aborted) throw new ProviderError("Answer provider returned an empty response");
   }
 }
 

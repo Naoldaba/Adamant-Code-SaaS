@@ -5,8 +5,14 @@ import {
   INSUFFICIENT_KNOWLEDGE_MESSAGE,
   type RetrievedContext
 } from "../lib/knowledge/prompt.js";
-import { LocalChatProvider } from "../lib/knowledge/provider.js";
+import { LocalChatProvider, streamChatAnswer, type ChatProvider } from "../lib/knowledge/provider.js";
 import { dedupeContextsByDocument } from "../lib/knowledge/rag.js";
+
+async function collect(iter: AsyncIterable<string>): Promise<string[]> {
+  const out: string[] = [];
+  for await (const s of iter) out.push(s);
+  return out;
+}
 
 function ctx(overrides: Partial<RetrievedContext> = {}): RetrievedContext {
   return {
@@ -68,6 +74,44 @@ describe("LocalChatProvider", () => {
     const a = await provider.generateAnswer(input);
     const b = await provider.generateAnswer(input);
     expect(a.text).toBe(b.text);
+  });
+});
+
+describe("LocalChatProvider streaming", () => {
+  it("streams the answer in multiple deltas that concatenate to generateAnswer's output", async () => {
+    const provider = new LocalChatProvider();
+    const input = { question: "How do I reset my password?", contexts: [ctx()], history: [] };
+    const deltas = await collect(provider.generateAnswerStream(input));
+    expect(deltas.length).toBeGreaterThan(1); // actually streamed, not one shot
+    expect(deltas.join("")).toBe((await provider.generateAnswer(input)).text);
+  });
+
+  it("stops early when the abort signal is already aborted (client disconnect)", async () => {
+    const provider = new LocalChatProvider();
+    const controller = new AbortController();
+    controller.abort();
+    const deltas = await collect(provider.generateAnswerStream({ question: "q", contexts: [ctx()], history: [] }, controller.signal));
+    expect(deltas).toHaveLength(0);
+  });
+});
+
+describe("streamChatAnswer", () => {
+  it("falls back to a single delta for a provider without generateAnswerStream", async () => {
+    const oneShot: ChatProvider = {
+      name: "oneshot",
+      async generateAnswer() {
+        return { text: "whole answer" };
+      }
+    };
+    const deltas = await collect(streamChatAnswer(oneShot, { question: "q", contexts: [ctx()], history: [] }));
+    expect(deltas).toEqual(["whole answer"]);
+  });
+
+  it("delegates to generateAnswerStream when the provider implements it", async () => {
+    const deltas = await collect(
+      streamChatAnswer(new LocalChatProvider(), { question: "q", contexts: [ctx()], history: [] })
+    );
+    expect(deltas.length).toBeGreaterThan(1);
   });
 });
 

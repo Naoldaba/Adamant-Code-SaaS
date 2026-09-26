@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Card, CardBody, CardHeader } from "../../../../components/ui/Card";
 import { Button } from "../../../../components/ui/Button";
-import { apiFetch } from "../../../../lib/apiClient";
+import { apiBaseUrl, apiFetch } from "../../../../lib/apiClient";
 
 // Mirrors CitationOut from the API (apps/api/src/lib/knowledge/rag.ts).
 type Citation = {
@@ -25,7 +25,19 @@ type Message = {
   status: "complete" | "error";
   created_at: string;
   citations: Citation[];
+  // True while the assistant answer is still being streamed in; cleared on the
+  // final `done`/`insufficient` event. Purely a UI hint (typing indicator).
+  streaming?: boolean;
 };
+
+// Events emitted by POST /assistant/conversations/:id/messages/stream (SSE). Mirror
+// AnswerStreamEvent in apps/api/src/lib/knowledge/rag.ts.
+type StreamEvent =
+  | { type: "user"; userMessage: Message }
+  | { type: "insufficient"; message: Message }
+  | { type: "delta"; text: string }
+  | { type: "done"; message: Message; citations: Citation[] }
+  | { type: "error"; message: string };
 
 type ConversationSummary = {
   id: string;
@@ -54,6 +66,67 @@ function citationHref(c: Citation): string | null {
   const slug = SOURCE_TYPE_TO_SLUG[c.sourceType];
   if (!slug || !c.sourceId) return null;
   return `/dashboard/knowledge/${slug}/${c.sourceId}`;
+}
+
+/**
+ * POST a question to the streaming endpoint and invoke `onEvent` for each parsed
+ * SSE event. The endpoint returns text/event-stream on success; auth/ownership
+ * failures come back as the standard JSON error envelope (non-2xx), which is thrown
+ * as an Error so the caller can surface it exactly like the other API calls.
+ */
+async function streamMessage(
+  conversationId: string,
+  content: string,
+  onEvent: (ev: StreamEvent) => void
+): Promise<void> {
+  const res = await fetch(`${apiBaseUrl()}/assistant/conversations/${conversationId}/messages/stream`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ content })
+  });
+
+  if (!res.ok || !res.body) {
+    // Error envelope (e.g. 401/404/validation) — never an SSE stream.
+    const text = await res.text().catch(() => "");
+    let message = `Request failed (${res.status})`;
+    try {
+      message = (JSON.parse(text) as { error?: { message?: string } }).error?.message ?? message;
+    } catch {
+      /* keep the status-based fallback */
+    }
+    throw new Error(message);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  // SSE frames are separated by a blank line; each frame carries a `data:` payload.
+  const flushFrame = (frame: string) => {
+    const dataLines = frame
+      .split("\n")
+      .filter((l) => l.startsWith("data:"))
+      .map((l) => l.slice(5).trimStart());
+    if (dataLines.length === 0) return;
+    try {
+      onEvent(JSON.parse(dataLines.join("\n")) as StreamEvent);
+    } catch {
+      /* ignore malformed frame */
+    }
+  };
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buffer.indexOf("\n\n")) !== -1) {
+      flushFrame(buffer.slice(0, sep));
+      buffer = buffer.slice(sep + 2);
+    }
+  }
+  if (buffer.trim()) flushFrame(buffer);
 }
 
 export function Chatbot() {
@@ -137,10 +210,14 @@ export function Chatbot() {
     setMessages((prev) => [...prev, optimistic]);
     setInput("");
 
+    // A stable placeholder for the assistant turn that fills in as deltas stream.
+    const streamingId = `streaming-${Date.now()}`;
+
     // Declared outside the try so the catch can re-sync the correct conversation,
     // including one just created lazily in this same call (activeId is still stale
     // in this closure at that point).
     let conversationId = activeId;
+    let streamOpened = false;
 
     try {
       // Create the conversation lazily on the first message of a draft chat.
@@ -153,35 +230,62 @@ export function Chatbot() {
         setActiveId(conversationId);
       }
 
-      const res = await apiFetch<{
-        userMessage: Message;
-        message: Message;
-        citations: Citation[];
-        insufficient: boolean;
-      }>(`/assistant/conversations/${conversationId}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ content: question })
-      });
-
-      // Replace the optimistic turn with the persisted user + assistant messages.
-      setMessages((prev) => {
-        const withoutOptimistic = prev.filter((m) => m.id !== optimistic.id);
-        return [
-          ...withoutOptimistic,
-          { ...res.userMessage, citations: [] },
-          { ...res.message, citations: res.citations }
-        ];
+      await streamMessage(conversationId, question, (ev) => {
+        switch (ev.type) {
+          case "user":
+            // Swap the optimistic user turn for the persisted one (real id).
+            setMessages((prev) =>
+              prev.map((m) => (m.id === optimistic.id ? { ...ev.userMessage, citations: [] } : m))
+            );
+            // Add the streaming assistant placeholder once the user turn is confirmed.
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: streamingId,
+                role: "assistant",
+                content: "",
+                status: "complete",
+                created_at: new Date().toISOString(),
+                citations: [],
+                streaming: true
+              }
+            ]);
+            streamOpened = true;
+            break;
+          case "delta":
+            setMessages((prev) =>
+              prev.map((m) => (m.id === streamingId ? { ...m, content: m.content + ev.text } : m))
+            );
+            break;
+          case "insufficient":
+            // Guardrail path: no tokens streamed; show the canned message as-is.
+            setMessages((prev) =>
+              prev.map((m) => (m.id === streamingId ? { ...ev.message, citations: [] } : m))
+            );
+            break;
+          case "done":
+            // Finalize: replace the placeholder with the persisted message + citations.
+            setMessages((prev) =>
+              prev.map((m) => (m.id === streamingId ? { ...ev.message, citations: ev.citations } : m))
+            );
+            break;
+          case "error":
+            // Provider failure mid-stream: drop the partial answer, show the error.
+            setMessages((prev) => prev.filter((m) => m.id !== streamingId));
+            setThreadError(ev.message);
+            break;
+        }
       });
 
       // Refresh the sidebar so the auto-generated title and new ordering appear.
       await loadConversations();
     } catch (e) {
-      // Provider/other failure: no answer is shown. The user turn was persisted
-      // server-side, so re-sync from the server to reflect canonical state and
-      // surface a clear error rather than a fabricated answer.
+      // Pre-stream failure (auth/ownership/network) or a dropped connection: no
+      // answer is shown. The user turn may have been persisted server-side, so
+      // re-sync from the server to reflect canonical state rather than a partial one.
       setThreadError(e instanceof Error ? e.message : "Failed to get an answer");
-      setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
-      if (conversationId) await openConversation(conversationId);
+      setMessages((prev) => prev.filter((m) => m.id !== optimistic.id && m.id !== streamingId));
+      if (conversationId && streamOpened) await openConversation(conversationId);
       await loadConversations();
     } finally {
       setSending(false);
@@ -372,7 +476,16 @@ function MessageBubble({ message }: { message: Message }) {
           isUser ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-900"
         }`}
       >
-        <div className="whitespace-pre-wrap">{message.content}</div>
+        {message.streaming && message.content.length === 0 ? (
+          <div className="flex items-center gap-1 text-slate-500">
+            <span className="animate-pulse">Thinking…</span>
+          </div>
+        ) : (
+          <div className="whitespace-pre-wrap">
+            {message.content}
+            {message.streaming && <span className="ml-0.5 animate-pulse">▋</span>}
+          </div>
+        )}
         {message.citations.length > 0 && <Citations citations={message.citations} />}
       </div>
     </div>

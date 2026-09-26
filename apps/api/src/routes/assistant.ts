@@ -8,10 +8,28 @@ import { parseJsonl, type LineError } from "../lib/knowledge/parseJsonl.js";
 import { runIngestion } from "../lib/knowledge/ingest.js";
 import { KNOWLEDGE_TYPES } from "../lib/knowledge/normalize.js";
 import { maxUploadBytes, validateUpload } from "../lib/knowledge/uploadValidation.js";
-import { createAnswer, toCitationOut } from "../lib/knowledge/rag.js";
+import { createAnswer, streamAnswer, toCitationOut } from "../lib/knowledge/rag.js";
 import { ProviderError } from "../lib/knowledge/provider.js";
 
 export const assistantRouter = Router();
+
+// Open an SSE response: text/event-stream with buffering disabled so deltas reach
+// the client as they are written (X-Accel-Buffering defeats nginx proxy buffering).
+function initSse(res: express.Response): void {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+  res.flushHeaders?.();
+}
+
+// Write one SSE frame: a named event plus its JSON payload.
+function writeSse(res: express.Response, event: string, data: unknown): void {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
 
 // Raw-text body parser scoped to the upload route only. The file is sent as the
 // raw request body (content-type text/plain) so it bypasses the global 1 MB JSON
@@ -353,6 +371,67 @@ assistantRouter.post(
         return next(new ApiError(502, "INTERNAL_ERROR", "The answer provider failed. Please try again."));
       }
       next(e);
+    }
+  }
+);
+
+// POST /assistant/conversations/:id/messages/stream — same RAG turn as above but
+// the answer is streamed to the client over SSE as it is generated. Retrieval and
+// the grounding guardrails run first (shared with the non-streaming path); a token
+// stream — and any LLM call — begins only after they pass. Owner-only.
+//
+// Emitted events: `user` (persisted user turn) → then either `insufficient` (the
+// canned no-knowledge answer, no stream started) or `delta`* + `done` (completed
+// message + citations). `error` replaces `done` on provider failure. Only the
+// fully-accumulated answer is persisted, and only on success — a partial answer is
+// never stored as complete, including when the client disconnects mid-stream.
+assistantRouter.post(
+  "/conversations/:id/messages/stream",
+  requireAuth,
+  requireUuidParam("id", "Conversation not found"),
+  validateBody(askSchema),
+  async (req, res, next) => {
+    const db = req.db!;
+    const { content } = req.body as z.infer<typeof askSchema>;
+
+    // If the client disconnects mid-stream, abort generation so we neither keep
+    // calling the provider nor persist a partial answer for a gone client.
+    const controller = new AbortController();
+    let clientGone = false;
+    req.on("close", () => {
+      clientGone = true;
+      controller.abort();
+    });
+
+    const events = streamAnswer(db, {
+      conversationId: req.params.id,
+      userId: req.user!.id,
+      question: content,
+      signal: controller.signal
+    });
+
+    let started = false;
+    try {
+      for await (const ev of events) {
+        // Ownership failed before anything streamed: respond with the standard
+        // 404 envelope instead of opening an SSE stream.
+        if (ev.type === "not_found") {
+          return next(new ApiError(404, "NOT_FOUND", "Conversation not found"));
+        }
+        if (!started) {
+          started = true;
+          initSse(res);
+        }
+        writeSse(res, ev.type, ev);
+        if (clientGone) break;
+      }
+    } catch (e) {
+      // Pre-stream failure (e.g. DB error) can still use the error envelope.
+      if (!started) return next(e);
+      // Headers already sent: surface as an SSE error rather than throwing.
+      writeSse(res, "error", { type: "error", message: "The answer provider failed. Please try again." });
+    } finally {
+      if (started && !res.writableEnded) res.end();
     }
   }
 );

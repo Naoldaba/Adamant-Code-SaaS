@@ -176,6 +176,7 @@ exports into a single shared/global knowledge base.
 | POST | `/assistant/conversations` | authenticated | Create a conversation (owned by the current user) |
 | GET | `/assistant/conversations/:id` | owner | Open a conversation: messages (chronological) + citations |
 | POST | `/assistant/conversations/:id/messages` | owner | Ask a question (RAG); returns the grounded answer + citations |
+| POST | `/assistant/conversations/:id/messages/stream` | owner | Ask a question (RAG); streams the answer incrementally over SSE |
 
 **Ingestion behavior**
 
@@ -228,6 +229,16 @@ in a pgvector `vector(EMBEDDING_DIM)` column and searched by cosine similarity.
   partial answer is never stored or returned as successful.
 - **Conversations** — belong to the authenticated user (ownership enforced on every endpoint via
   the session, never a client-supplied id); the title is auto-generated from the first question.
+- **Streaming (SSE)** — the chatbot uses `POST /assistant/conversations/:id/messages/stream`, which
+  returns `text/event-stream` and pushes the answer as it is generated. The pre-generation pipeline
+  is identical to the non-streaming endpoint (retrieval + grounding threshold run **first**); a token
+  stream starts only after the guardrails pass. Events, in order: `user` (persisted user turn) → then
+  either `insufficient` (the no-knowledge answer, emitted with **no** token stream) or `delta`* +
+  `done` (the completed message + citations). `error` replaces `done` on provider failure. Only the
+  fully-accumulated answer is persisted, and only on success — a partial answer is **never** stored as
+  complete, including when the client disconnects mid-stream (the server aborts generation and stores
+  nothing for that turn). The local provider streams too, so incremental output works with no API key.
+  The non-streaming `POST .../messages` endpoint remains available and behaves as before.
 
 ## Project Structure
 
