@@ -79,3 +79,99 @@ export type KnowledgeItemRow = {
   created_at: Date;
   updated_at: Date;
 };
+
+// ---------------------------------------------------------------------------
+// Knowledge Assistant (RAG) rows
+// ---------------------------------------------------------------------------
+
+// A document's originating module type, or `upload` for admin file uploads.
+export type KbSourceType = KnowledgeItemType | "upload";
+
+export type IngestionSource = "upload" | "module";
+
+export type IngestionStatus = "pending" | "running" | "succeeded" | "failed";
+
+export type IngestionStats = {
+  total: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+};
+
+export type IngestionError = {
+  line: number;
+  error: string;
+};
+
+export type KbIngestionRow = {
+  id: string;
+  filename: string | null;
+  source: IngestionSource;
+  status: IngestionStatus;
+  uploaded_by: string | null;
+  stats_json: IngestionStats | Record<string, never>;
+  errors_json: IngestionError[];
+  created_at: Date;
+  completed_at: Date | null;
+};
+
+export type KbDocumentRow = {
+  id: string;
+  source_type: KbSourceType;
+  source_id: string | null;
+  title: string;
+  content: string;
+  metadata_json: Record<string, unknown>;
+  content_hash: string;
+  ingestion_id: string | null;
+  created_at: Date;
+  updated_at: Date;
+};
+
+export type KbChunkRow = {
+  id: string;
+  document_id: string;
+  chunk_index: number;
+  content: string;
+  token_count: number | null;
+  // Stored as a pgvector `vector` column; surfaced as a number[] in app code.
+  embedding: number[] | null;
+  metadata_json: Record<string, unknown>;
+  created_at: Date;
+};
+
+export type ConversationRow = {
+  id: string;
+  user_id: string;
+  title: string;
+  created_at: Date;
+  updated_at: Date;
+};
+
+export type MessageRole = "user" | "assistant";
+
+export type MessageStatus = "complete" | "error";
+
+export type MessageRow = {
+  id: string;
+  conversation_id: string;
+  role: MessageRole;
+  content: string;
+  status: MessageStatus;
+  error_json: Record<string, unknown> | null;
+  created_at: Date;
+};
+
+export type MessageCitationRow = {
+  id: string;
+  message_id: string;
+  document_id: string | null;
+  chunk_id: string | null;
+  source_type: KbSourceType;
+  source_id: string | null;
+  title: string;
+  score: number;
+  snippet: string | null;
+  created_at: Date;
+};

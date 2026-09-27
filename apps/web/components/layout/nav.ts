@@ -11,6 +11,7 @@ import {
   ScrollText,
   Settings,
   Shield,
+  Sparkles,
   Users,
   Wrench
 } from "lucide-react";
@@ -30,7 +31,8 @@ export const navGroups: NavGroup[] = [
   {
     label: "Overview",
     items: [
-      { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard }
+      { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+      { label: "Knowledge Assistant", href: "/dashboard/knowledge-assistant", icon: Sparkles }
     ]
   },
   {

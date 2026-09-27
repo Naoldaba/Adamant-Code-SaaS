@@ -1,6 +1,8 @@
 services:
   db:
-    image: postgres:16
+    # pgvector/pgvector:pg16 is a drop-in replacement for postgres:16 that ships
+    # the `vector` extension used for RAG embedding similarity search.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -26,6 +28,25 @@ services:
       PASSWORD_SALT: dev_salt_change_me
       SESSION_SECRET: dev_session_secret_change_me
       CORS_ORIGIN: http://localhost:3000
+      # Embedding dimension for RAG chunk vectors. Must match the migration column
+      # and the configured provider. 768 is what we request from Gemini
+      # gemini-embedding-001, and is also valid for the local provider and OpenAI
+      # (via its dimensions param). Changing this requires a fresh DB (down -v) +
+      # re-ingestion.
+      EMBEDDING_DIM: "768"
+      # Max Knowledge Uploader file size in MB (oversized uploads are rejected).
+      KB_MAX_UPLOAD_MB: "5"
+      # RAG retrieval tuning: chunks pulled per question, and the minimum cosine
+      # similarity for a chunk to count as relevant. 0.1 suits the offline local
+      # provider's low/compressed scores; with a real provider (Gemini/OpenAI)
+      # raise it (e.g. 0.5-0.7) for sharper insufficient-knowledge behavior.
+      RAG_TOP_K: "6"
+      RAG_MIN_SCORE: "${RAG_MIN_SCORE:-0.1}"
+      # Provider selection (priority OpenAI > Gemini > offline local). Set one key
+      # in a .env file at the repo root (docker compose reads it automatically).
+      # Left unset here so the deterministic local provider runs with no secret.
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
     ports:
       - "4000:4000"
     depends_on:
